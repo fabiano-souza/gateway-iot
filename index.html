@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>Ponte Web Serial - Adafruit IO</title>
+    <!-- Carrega a biblioteca MQTT para navegadores (Zero Instalação) -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body { font-family: Verdana, sans-serif; background-color: #f4f4f4; padding: 20px; }
+        .container { max-width: 600px; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 0 10px rgba(0,0,0,0.1); margin: auto; }
+        h2 { color: #B20000; text-align: center; }
+        label { font-weight: bold; display: block; margin-top: 10px; }
+        input { width: 100%; padding: 8px; margin-top: 5px; box-sizing: border-box; }
+        button { width: 100%; padding: 12px; margin-top: 15px; background-color: #0055A4; color: white; border: none; font-weight: bold; cursor: pointer; border-radius: 4px; }
+        button:hover { background-color: #003366; }
+        #log { background: #333; color: #00FF00; padding: 10px; height: 150px; overflow-y: scroll; margin-top: 15px; font-family: monospace; font-size: 10pt; }
+        .status { text-align: center; margin-top: 10px; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h2>Gateway IoT - Etec</h2>
+    
+    <label>Adafruit IO Username:</label>
+    <input type="text" id="aio_user" placeholder="Digite seu usuário">
+    
+    <label>AIO Key (Active Key):</label>
+    <input type="password" id="aio_key" placeholder="Digite sua AIO Key">
+    
+    <button id="btnConnect" onclick="iniciarConexao()">1. Conectar USB e Nuvem</button>
+    
+    <div class="status" id="statusLabel">Status: Aguardando conexão...</div>
+
+    <div id="log">Console de Dados:<br></div>
+</div>
+
+<script>
+    let port;
+    let mqttClient;
+
+    function logar(texto) {
+        const logDiv = document.getElementById("log");
+        logDiv.innerHTML += texto + "<br>";
+        logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    async function iniciarConexao() {
+        const user = document.getElementById("aio_user").value.trim();
+        const key = document.getElementById("aio_key").value.trim();
+
+        if (!user || !key) {
+            alert("Preencha o Usuário e a AIO Key primeiro!");
+            return;
+        }
+
+        // 1. Conecta ao Adafruit IO via WebSocket
+        logar("Conectando ao Adafruit IO...");
+        
+        // O parâmetro reconnectPeriod: 0 impede que o sistema fique em loop infinito caso a senha esteja errada
+        mqttClient = mqtt.connect('wss://io.adafruit.com:443/mqtt', {
+            username: user,
+            password: key,
+            reconnectPeriod: 0 
+        });
+
+        mqttClient.on('connect', function () {
+            logar("✓ Adafruit IO Conectado!");
+            document.getElementById("statusLabel").style.color = "green";
+            document.getElementById("statusLabel").innerText = "Status: Online e Transmitindo";
+        });
+
+        mqttClient.on('error', function (err) {
+            logar("❌ ERRO: Conexão recusada. Verifique se o Username e a AIO Key estão corretos.");
+            document.getElementById("statusLabel").style.color = "red";
+            document.getElementById("statusLabel").innerText = "Status: Falha na Autenticação";
+            mqttClient.end(); // Força o encerramento da tentativa
+        });
+
+        // 2. Conecta ao USB do Arduino (Web Serial API)
+        try {
+            port = await navigator.serial.requestPort();
+            await port.open({ baudRate: 9600 });
+            logar("✓ Arduino Conectado via USB!");
+
+            const decoder = new TextDecoderStream();
+            const inputDone = port.readable.pipeTo(decoder.writable);
+            const inputStream = decoder.readable;
+            const reader = inputStream.getReader();
+
+            let linhaBuffer = "";
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                
+                linhaBuffer += value;
+                let quebraLinha = linhaBuffer.indexOf('\n');
+                
+                while (quebraLinha >= 0) {
+                    let linhaCompleta = linhaBuffer.slice(0, quebraLinha).trim();
+                    linhaBuffer = linhaBuffer.slice(quebraLinha + 1);
+                    quebraLinha = linhaBuffer.indexOf('\n');
+                    
+                    if (linhaCompleta) processarDado(linhaCompleta, user);
+                }
+            }
+        } catch (error) {
+            logar("Erro USB: Acesso negado ou porta em uso pelo Monitor Serial da IDE.");
+        }
+    }
+
+    // 3. Traduz o JSON e envia para a Nuvem
+    function processarDado(texto, user) {
+        logar("Lido do USB: " + texto);
+        try {
+            // Tenta transformar o texto do Arduino em um objeto JSON real
+            let dadosJson = JSON.parse(texto);
+            
+            // Verifica se o cliente MQTT conectou com sucesso antes de tentar enviar
+            if (mqttClient && mqttClient.connected) {
+                for (let chave in dadosJson) {
+                    let topico = user + "/feeds/" + chave;
+                    let valor = dadosJson[chave].toString();
+                    
+                    mqttClient.publish(topico, valor);
+                    logar(" -> Enviado para nuvem: [" + chave + "] = " + valor);
+                }
+            } else {
+                logar(" ⚠️ Aguardando conexão com a nuvem para enviar dados...");
+            }
+        } catch (e) {
+            logar(" ❌ Erro: O texto recebido não está no formato JSON exigido.");
+        }
+    }
+</script>
+</body>
+</html>
